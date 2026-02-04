@@ -1,17 +1,50 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-import numpy as np
-import tensorflow as tf
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+import joblib
+import pandas as pd
 
+# -----------------------------
+# App Init
+# -----------------------------
 app = FastAPI(title="Rent Prediction + ROI API")
 
-model = tf.keras.models.load_model("model.keras")
+# Enable CORS (important for frontend calls)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Standard appreciation rate
-APPRECIATION_RATE = 0.05   # 5% yearly
+# -----------------------------
+# Load Model Bundle
+# -----------------------------
+bundle = joblib.load("rent_model_bundle.pkl")
+model = bundle["model"]
+features = bundle["features"]
+
+APPRECIATION_RATE = 0.05
 
 
+# -----------------------------
+# Opening Route
+# -----------------------------
+@app.get("/")
+def home():
+    return {
+        "message": "Rent Prediction + ROI API Running",
+        "docs": "/docs",
+        "predict_endpoint": "/predict"
+    }
+
+
+# -----------------------------
+# Input Schema (Alias Handling)
+# -----------------------------
 class PropertyInput(BaseModel):
+
     area: float
     beds: int
     bathrooms: int
@@ -20,59 +53,79 @@ class PropertyInput(BaseModel):
     locality_enc: float
 
     furnishing_Furnished: float
-    furnishing_SemiFurnished: float
+    furnishing_Semi_Furnished: float = Field(alias="furnishing_Semi-Furnished")
     furnishing_Unfurnished: float
 
     city_Bangalore: float
     city_Mumbai: float
     city_Nagpur: float
-    city_NewDelhi: float
+    city_New_Delhi: float = Field(alias="city_New Delhi")
     city_Pune: float
 
-    # Financial inputs
     purchase_price: float
     total_expenses: float
     total_investment: float
     years: float
 
+    class Config:
+        allow_population_by_field_name = True
 
+
+# -----------------------------
+# Prediction Endpoint
+# -----------------------------
 @app.post("/predict")
 def predict_roi(data: PropertyInput):
 
-    features = np.array([[
-        data.area,
-        data.beds,
-        data.bathrooms,
-        data.balconies,
-        data.area_rate,
-        data.locality_enc,
-        data.furnishing_Furnished,
-        data.furnishing_SemiFurnished,
-        data.furnishing_Unfurnished,
-        data.city_Bangalore,
-        data.city_Mumbai,
-        data.city_Nagpur,
-        data.city_NewDelhi,
-        data.city_Pune
-    ]])
+    # Create input dictionary
+    input_dict = {
+        "area": data.area,
+        "beds": data.beds,
+        "bathrooms": data.bathrooms,
+        "balconies": data.balconies,
+        "area_rate": data.area_rate,
+        "locality_enc": data.locality_enc,
+        "furnishing_Furnished": data.furnishing_Furnished,
+        "furnishing_Semi-Furnished": data.furnishing_Semi_Furnished,
+        "furnishing_Unfurnished": data.furnishing_Unfurnished,
+        "city_Bangalore": data.city_Bangalore,
+        "city_Mumbai": data.city_Mumbai,
+        "city_Nagpur": data.city_Nagpur,
+        "city_New Delhi": data.city_New_Delhi,
+        "city_Pune": data.city_Pune,
+    }
 
-    # Predict monthly rent
-    predicted_rent = float(model.predict(features)[0][0])
+    df = pd.DataFrame([input_dict])
 
-    # ---- Future Property Value (Auto Calculated) ----
+    # Ensure correct column order + missing safety
+    df = df.reindex(columns=features, fill_value=0)
+
+    # -----------------------------
+    # Rent Prediction
+    # -----------------------------
+    predicted_rent = float(model.predict(df)[0])
+
+    # -----------------------------
+    # Future Property Value
+    # -----------------------------
     future_property_value = data.purchase_price * (
         (1 + APPRECIATION_RATE) ** data.years
     )
 
-    # ---- ROI Calculation ----
+    # -----------------------------
+    # ROI Formula
+    # -----------------------------
+    total_rental_income = predicted_rent * 12 * data.years
+    capital_gain = future_property_value - data.purchase_price
+
     roi = (
-        ((predicted_rent * 12 * data.years - data.total_expenses)
-         + (future_property_value - data.purchase_price))
+        (total_rental_income + capital_gain - data.total_expenses)
         / data.total_investment
     ) * 100
 
     return {
-        "predicted_monthly_rent": predicted_rent,
-        "assumed_future_property_value": future_property_value,
-        "roi_percent": roi
+        "predicted_monthly_rent": round(predicted_rent, 2),
+        "total_rental_income": round(total_rental_income, 2),
+        "future_property_value": round(future_property_value, 2),
+        "roi_percent": round(roi, 2)
     }
